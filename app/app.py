@@ -9,7 +9,8 @@ from fastapi import FastAPI, HTTPException, Request, Depends
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
-from intent_classifier import IntentClassifier
+from intent_classifier.intent_classifier import IntentClassifier
+
 from db.engine import get_mongo_collection
 from app.auth import verify_token
 
@@ -34,12 +35,12 @@ app.add_middleware(
     CORSMiddleware,
     allow_origins=[
         "http://localhost",
-        "http://localhost:3000",  # React ou outra frontend local
-        "https://meusite.com",    # domínio em produção
+        "http://localhost:3000",    # React ou outra frontend local
+        "https://meusite.com",      # domínio em produção
     ],
     allow_credentials=True,
-    allow_methods=["*"],              # permite todos os métodos: GET, POST, etc
-    allow_headers=["*"],              # permite todos os headers (Authorization, Content-Type...)
+    allow_methods=["*"],            # permite todos os métodos: GET, POST, etc
+    allow_headers=["*"],            # permite todos os headers (Authorization, Content-Type...)
     # Durante o desenvolvimento: você pode usar allow_origins=["*"] para liberar tudo.
     # Em produção: evite "*" e especifique os domínios confiáveis.
 )
@@ -70,13 +71,26 @@ async def conditional_auth():
 # Load models
 MODELS = {}
 try:
-    logger.info("Loading confusion model...")
+    logger.info("Loading ML models...") # Alterado para ser mais genérico
     # Load all the .keras files in the intent_classifier/models folder
     model_files = [f for f in os.listdir(os.path.join(os.path.dirname(__file__), "..", "intent_classifier", "models")) if f.endswith(".keras")]
+    
+    if not model_files:
+        logger.warning("No .keras model files found in the specified directory.")
+
     for model_file in model_files:
         model_path = os.path.join(os.path.dirname(__file__), "..", "intent_classifier", "models", model_file)
         model_name = model_file.replace(".keras", "")
+        
+        # 🟢 MODIFICAÇÃO ADICIONADA AQUI: Log antes de carregar o modelo
+        logger.warning(f"Attempting to load model: {model_name} from {model_path}")
+        
+        # Esta linha é onde o TensorFlow pode demorar ou travar
         MODELS[model_name] = IntentClassifier(load_model=model_path)
+        
+        # 🟢 MODIFICAÇÃO ADICIONADA AQUI: Log após o carregamento bem-sucedido
+        logger.warning(f"Successfully loaded model: {model_name}.")
+
     logger.info("Models loaded successfully")
 except Exception as e:
     logger.error(f"Failed to load models: {str(e)}")
@@ -89,7 +103,8 @@ Routes
 
 @app.get("/")
 async def root():
-    return {"message": "Basic ML App is running in {ENV} mode"}
+    # Use f-string format here
+    return {"message": f"Basic ML App is running in {ENV} mode"}
 
 
 @app.post("/predict")
@@ -110,12 +125,19 @@ async def predict(text: str, owner: str = Depends(conditional_auth)):
         "timestamp": int(datetime.now(timezone.utc).timestamp())
     }
     
-    collection.insert_one(results)
-    results['id'] = str(results['_id'])
-    results.pop('_id')
+    # Certifique-se de que a coleção foi inicializada
+    if collection is not None:
+        try:
+            collection.insert_one(results)
+            results['id'] = str(results['_id'])
+            results.pop('_id')
+        except Exception as e:
+            logger.error(f"Failed to insert log into MongoDB: {str(e)}")
+            # O erro não deve impedir a resposta, mas deve ser logado
+            results['db_error'] = "Failed to log prediction to database."
+
 
     return JSONResponse(content=results)
-
 
 
 if __name__ == "__main__":
