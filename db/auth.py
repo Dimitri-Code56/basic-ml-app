@@ -99,7 +99,7 @@ async def conditional_auth(request: Request):
         return "dev_user"
     else:
         try:
-            return await verify_token(request)
+            return verify_token(request)
         except HTTPException as he:
             raise he
         except Exception as e:

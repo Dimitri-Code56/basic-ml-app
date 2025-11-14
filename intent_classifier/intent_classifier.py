@@ -6,34 +6,50 @@ To use it as a module, you can do:
 
     from intent_classifier import IntentClassifier
 
-    classifier = IntentClassifier(config="configs/confusion.yml", examples_file="data/confusion_intents.yml")
-    classifier.train(save_model="models/confusion-clf-v1/")
+    # train a model
+    classifier = IntentClassifier(config="models/confusion_config.yml", training_data="data/confusion_intents.yml")
+    classifier.train(save_model="models/confusion-clf/")
+    # or load a model from W&B
+    classifier = IntentClassifier(config="models/confusion_config.yml", load_model="adaj/intent-classifier-2025-2/confusion-clf:v1")
+    # predict a new text
     classifier.predict(input_text="oi")
-    # classifier.cross_validation(n_splits=5)
+    # cross-validate the model
+    classifier.cross_validation(n_splits=5)
 
 Or, or you can use it as a CLI tool, you can do:
 ::
 
-    cd intent_classifier
+cd intent_classifier
 
-    python intent_classifier.py train \
-        --config="models/confusion-v1_config.yml" \
-        --examples_file="data/confusion_intents.yml" \
-        --save_model="models/confusion-v1.keras"
+python intent_classifier.py train \
+    --config="models/confusion_config.yml" \
+    --training_data="data/confusion_intents.yml" \
+    --save_model="models/confusion.keras" \
+    --wandb_project="intent-classifier"
 
-    python intent_classifier.py predict \
-        --load_model="models/confusion-v1.keras" \
-        --input_text="teste"
+python intent_classifier.py predict \
+    --load_model="models/confusion.keras" \
+    --input_text="teste teste" \
+    --wandb_project="intent-classifier"
+
+# TODO: Fix CV implementation...
+python intent_classifier.py cross_validation \
+    --config="models/confusion_config.yml" \
+    --training_data="data/confusion_intents.yml" \
+    --n_splits=5 \
+    --wandb_project="intent-classifier"
 
 """
 # instalar alguns pacotes auxiliares
 
 import os
+import logging
 from pathlib import Path
 from typing import List, Optional, Union, Tuple, Dict, Any
 from dataclasses import dataclass
 import yaml
 from pprint import pprint
+import re
 
 import pandas as pd
 import numpy as np
@@ -51,6 +67,10 @@ from tensorflow.keras.saving import register_keras_serializable
 import wandb
 from wandb.integration.keras import WandbMetricsLogger, WandbEvalCallback # WandbModelCheckpoint
 
+import dotenv
+dotenv.load_dotenv()
+
+logger = logging.getLogger(__name__)
 
 @register_keras_serializable()
 class HubLayer(tf.keras.layers.Layer):
@@ -103,8 +123,6 @@ class Config:
     """The current task being performed (e.g., 'train', 'predict')."""
     stop_words_file: Optional[str] = None
     """Path to a text file containing stopwords, one per line."""
-    wandb_project: Optional[str] = None
-    """Name of the Weights & Biases project to log to. If None, W&B is disabled."""
     min_words: int = 1
     """The minimum number of words required in an utterance for processing. Shorter inputs are padded."""
     embedding_model: Union[str, List[str]] = 'https://www.kaggle.com/models/google/universal-sentence-encoder/tensorFlow2/multilingual/2'
@@ -147,51 +165,54 @@ def remove_duplicate_words(text: str) -> str:
     return ' '.join(result)
 
 
-def fetch_model_from_wandb(url: str) -> str:
+def fetch_artifact_from_wandb(model_full_name: str) -> Tuple[str, str]:
     """
-    Download a model artifact from W&B or return a local path.
+    Download a model artifact from W&B and return the paths to the model and config files.
 
-    If ``url`` is a local file path or ``file://`` URL, it is returned as-is.
-    Otherwise, the artifact is downloaded via the W&B API using the key from
-    the ``WANDB_API_KEY`` environment variable and saved to the 'models/' folder.
-    The path to the downloaded model file is returned.
-
-    :param url: The W&B artifact URL (e.g., "user/project/model:latest") or a local file path.
-    :type url: str
-    :return: The local file path to the downloaded Keras model file.
-    :rtype: str
+    :param model_full_name: The W&B artifact full name (e.g., "adaj/intent-classifier-2025-2/confusion-clf:v1").
+                           Must have format: "entity/project/artifact_name:version"
+    :type model_full_name: str
+    :return: A tuple containing the local file path to the Keras model file and the config file.
+    :rtype: tuple[str, str]
+    :raises ValueError: If format is invalid or files are not found in the artifact.
     """
-    # Support file:// URLs and plain local paths for offline tests
-    if url.startswith("file://"):
-        local = url[7:]
-        if os.path.exists(local):
-            return local
-    if os.path.exists(url):
-        return url
+    # Validate format
+    parts = model_full_name.split("/")
+    if len(parts) != 3 or ":" not in parts[2]:
+        raise ValueError(
+            f"Invalid model_full_name format: '{model_full_name}'. "
+            f"Expected format: 'entity/project/artifact_name:version' (e.g., 'adaj/intent-classifier-2025-2/confusion-clf:v1')"
+        )
+    
+    # Download artifact from W&B
+    try:
+        api = wandb.Api()
+        artifact = api.artifact(model_full_name, type='model')
+    except wandb.errors.CommError as e:
+        raise ValueError(f"Could not fetch artifact '{model_full_name}' from W&B. Ensure the path is correct and you are logged in. Original error: {e}")
 
-    api_key = os.environ.get("WANDB_API_KEY")
-    if not api_key:
-        wandb.login()
-    else:
-        wandb.login(key=api_key)
-    
-    api = wandb.Api()
-    if ":" not in url:
-        url = f"{url}:latest"
-    artifact = api.artifact(url)
-    
-    # Create models directory if it doesn't exist
-    models_dir = Path(os.path.join(os.path.dirname(__file__), "models"))
+    # Create a target directory for the download
+    models_dir = Path(os.path.dirname(__file__)) / "models"
     models_dir.mkdir(exist_ok=True)
     
-    # Download artifact to models directory
-    path = artifact.download(root=models_dir)
+    # Download artifact content. The path returned is the directory where files are.
+    download_path = artifact.download(root=models_dir)
     
-    # Try to locate a Keras model file inside the downloaded directory
-    for fname in os.listdir(path):
-        if fname.endswith(".keras") or fname.endswith(".h5"):
-            return os.path.join(path, fname)
-    return path
+    model_file, config_file = None, None
+    # Iterate over the files *in the artifact manifest* to find the correct ones.
+    # This prevents accidentally loading unrelated files from the same directory.
+    for f in artifact.files():
+        if f.name.endswith((".keras", ".h5")):
+            model_file = os.path.join(download_path, f.name)
+        elif f.name.endswith("_config.yml"):
+            config_file = os.path.join(download_path, f.name)
+            
+    if not model_file:
+        raise ValueError(f"Model file (.keras or .h5) not found in W&B artifact '{model_full_name}'.")
+    if not config_file:
+        raise ValueError(f"Config file (_config.yml) not found in W&B artifact '{model_full_name}'.")
+        
+    return model_file, config_file
 
 
 class IntentClassifier:
@@ -208,63 +229,72 @@ class IntentClassifier:
     :param load_model: A path to a saved Keras model (`.keras` file) or a W&B artifact URL.
                        If provided, the model and its associated config are loaded.
     :type load_model: str, optional
-    :param examples_file: Path to a YAML file containing training examples.
+    :param training_data: Path to a YAML file containing training examples.
                           Required for training or cross-validation.
-    :type examples_file: str, optional
+    :type training_data: str, optional
     :raises ValueError: If `config` is not provided and cannot be inferred from `load_model`.
     :raises ValueError: If `load_model` path is provided but the file is not found.
     """
 
     def __init__(self, config: Optional[Union[str, Config]] = None,
                  load_model: Optional[str] = None,
-                 examples_file: Optional[str] = None):
+                 training_data: Optional[str] = None,
+                 wandb_project: Optional[str] = None):
         """
         Initializes the IntentClassifier.
         """
-        if load_model is None:
-            self.model = None
-        else:
+        self.model = None
+        local_model_path = None
+        
+        # Set up W&B project early
+        self.wandb_project = wandb_project or os.environ.get("WANDB_PROJECT") or "intent-classifier"
+
+        if load_model:
+            # Check if load_model is a local file path or a W&B artifact URL
             if os.path.exists(load_model):
-                self.model = tf.keras.models.load_model(load_model)
-                print(f"Loaded keras model from {load_model}.")
+                local_model_path = load_model
             else:
-                # Try to load from W&B
-                local_model_path = fetch_model_from_wandb(load_model) # local_model_path é a string do caminho
-                self.model = tf.keras.models.load_model(local_model_path)
-                print(f"Loaded keras model from {load_model}.")
-            if self.model is None:
-                raise ValueError(f"Model file not found: {load_model}. Try to load from W&B or provide a valid path to a Keras model file.")
-        # Load config
-        self._load_config(config, load_model)
+                # If not a local path, assume it's a W&B artifact and fetch it.
+                # The associated config path will be discovered and used automatically.
+                local_model_path, config = fetch_artifact_from_wandb(load_model)
+            
+            self.model = tf.keras.models.load_model(local_model_path)
+            print(f"Loaded Keras model from {local_model_path}.")
+
+        # Load config. If fetched from W&B, `config` is already the correct path.
+        self._load_config(config)
+        
         # Load intents from the examples file if provided
-        self._load_intents(examples_file)
-        # Initialize stop_words
+        self._load_intents(training_data)
+        
+        # Validate model output size matches config codes (if model is loaded)
+        if self.model:
+            self._validate_model_config_compatibility()
+            
+        # Initialize stop_words and one-hot encoder
         self._load_stop_words(self.config.stop_words_file)
-        # Set up one-hot encoder
         self._setup_onehot_encoder()
-        # Set up W&B
-        self.wandb_run = None
-        if self.config.wandb_project:
-              # Create wandb run instance
-              self.wandb_run = wandb.init(project=self.config.wandb_project, 
-                                          config=self.config.__dict__)
-              # Create and log artifact
-              if self.examples_file is not None:
-                  artifact = wandb.Artifact("my_dataset", type="dataset")
-                  artifact.add_file(examples_file) # Assuming 'examples_file' is the dataset file
-                  self.wandb_run.log_artifact(artifact)
+        
+        # Set up W&B run
+        if self.wandb_project:
+            print(f"Setting up W&B project: {self.wandb_project}")
+            wandb.login(key=os.environ.get("WANDB_API_KEY"))
+            self.wandb_run = wandb.init(project=self.wandb_project, config=self.config.__dict__)
+            if self.training_data:
+                artifact = wandb.Artifact(Path(self.training_data).name, type="dataset")
+                artifact.add_file(self.training_data)
+                self.wandb_run.log_artifact(artifact)
+        else:
+            self.wandb_run = None
+            print("W&B project not set. No W&B run will be created.")
 
-    def _load_config(self, config: Optional[Union[str, Config]], load_model: Optional[str]) -> Config:
+    def _load_config(self, config: Optional[Union[str, Config]]) -> None:
         """
-        Loads the configuration from a file, object, or existing model path.
+        Loads the configuration from a file path or a Config object.
 
-        :param config: A path to a YAML config file, a Config object, or None.
+        :param config: A path to a YAML config file or a Config object.
         :type config: str, Config, optional
-        :param load_model: Path to a saved Keras model. Used to find the config if `config` is None.
-        :type load_model: str, optional
-        :return: The loaded Config object.
-        :rtype: Config
-        :raises ValueError: If config cannot be loaded.
+        :raises ValueError: If config is not provided or is of an invalid type.
         """
         if isinstance(config, str):
             with open(config, 'r') as f:
@@ -273,37 +303,33 @@ class IntentClassifier:
         elif isinstance(config, Config):
             self.config = config
         elif config is None:
-            # Load from a model
-            if load_model is not None:
-                config_path = load_model.replace(".keras", "_config.yml")
-                if not os.path.exists(config_path):
-                    raise ValueError('The `config` object must be provided for this IntentClassifier.')
-                with open(config_path, 'r') as f:
-                    self.config = Config(**yaml.safe_load(f))
-            else:
-                # We must load the config of this model properly...
-                raise ValueError('The `config` object must be provided for this IntentClassifier.')
-        return self.config
+            # If no config is provided at all, we can't proceed.
+            raise ValueError(
+                "A 'config' must be provided, either as a file path, a Config object, "
+                "or as part of a W&B artifact."
+            )
+        else:
+            raise TypeError(f"Unsupported config type: {type(config)}")
     
-    def _load_intents(self, examples_file: Optional[str]) -> np.ndarray:
+    def _load_intents(self, training_data: Optional[str]) -> np.ndarray:
         """
         Loads and preprocesses intents from a YAML examples file.
 
-        If `examples_file` is provided, it reads the file, extracts utterances
+        If `training_data` is provided, it reads the file, extracts utterances
         and labels, shuffles them, and stores them in `self.input_text`
         and `self.labels`. It also populates `self.codes` and `self.config.codes`.
 
-        If `examples_file` is None, it loads `self.codes` from `self.config.codes`.
+        If `training_data` is None, it loads `self.codes` from `self.config.codes`.
 
-        :param examples_file: Path to a YAML file with intent examples.
-        :type examples_file: str, optional
+        :param training_data: Path to a YAML file with intent examples.
+        :type training_data: str, optional
         :return: An array of unique intent codes (labels).
         :rtype: np.ndarray
         """
-        self.examples_file = examples_file
-        if examples_file is not None:
-            pprint(f"Loading intents from {examples_file}...")
-            with open(examples_file, 'r') as f:
+        self.training_data = training_data
+        if training_data is not None:
+            pprint(f"Loading intents from {training_data}...")
+            with open(training_data, 'r') as f:
                 self.intents_data = yaml.safe_load(f)
             # Preprocess intents
             input_text = []
@@ -343,6 +369,32 @@ class IntentClassifier:
         print(f"Loaded {len(self.stop_words)} stop words from {stop_words_file}.")
         return self
     
+    def _validate_model_config_compatibility(self) -> None:
+        """
+        Validates that the loaded model's output size matches the number of categories
+        in config.codes. This ensures the model and config are compatible.
+
+        :raises ValueError: If the model's output size doesn't match the number of codes
+                            in the config, indicating an invalid model-config mismatch.
+        """
+        if self.model is None:
+            return
+        # Get the model's output layer size (number of classes the model was trained with)
+        model_output_size = self.model.output_shape[-1]
+        # Get the number of codes from config
+        config_codes_count = len(self.config.codes) if self.config.codes else 0
+        # Also check onehot_encoder categories if it exists (though it shouldn't at this point)
+        # This is a double-check to ensure consistency
+        if model_output_size != config_codes_count:
+            error_msg = (
+                f"Model-config mismatch detected: The loaded model was trained with "
+                f"{model_output_size} categories, but the config file specifies "
+                f"{config_codes_count} categories (codes: {self.config.codes}).\n\n"
+                f"This indicates an invalid model configuration. The model's output layer "
+                f"and the one-hot encoder categories must match.\n\n"
+            )
+            raise ValueError(error_msg)
+    
     def _setup_onehot_encoder(self) -> OneHotEncoder:
         """
         Initializes and fits the OneHotEncoder based on the loaded intent codes.
@@ -372,7 +424,7 @@ class IntentClassifier:
                     patience=self.config.callback_patience,
                     restore_best_weights=True)
             )
-        if self.config.wandb_project:
+        if self.wandb_project:
             callbacks.append(WandbMetricsLogger())
         
         # Configure ExponentialDecay
@@ -397,7 +449,7 @@ class IntentClassifier:
         """
         Finishes the current Weights & Biases run, if one is active.
         """
-        if self.config.wandb_project and self.wandb_run:
+        if self.wandb_project and self.wandb_run:
             self.wandb_run.finish()
 
     def preprocess_text(self, text: tf.Tensor) -> tf.Tensor:
@@ -432,6 +484,13 @@ class IntentClassifier:
                 # Create padding
                 padding = tf.strings.join(["<>"] * (self.config.min_words + 1), separator=' ')
                 text = padding
+
+        # Iterate on text and replace punctuation with "PUNCTUATION" (it helps some sentence encoders that do not parse punctuation, like Universal Sentence Encoder)
+        for p, t in {"?": "QUESTION_MARK", ".": "PERIOD", ",": "COMMA", "!": "EXCLAMATION_MARK"}.items():
+            espaped_p = re.escape(p)
+            text = tf.strings.regex_replace(text, espaped_p, f" {t} ")
+        text = tf.strings.regex_replace(text, r"\s+", " ")
+        text = tf.strings.strip(text)
         
         # Ensure output is always a 0-D tensor (scalar)
         return tf.strings.as_string(text)
@@ -495,12 +554,12 @@ class IntentClassifier:
         :type tf_verbosity: int, optional
         :return: The trained Keras model.
         :rtype: tf.keras.Model
-        :raises AssertionError: If `examples_file` was not provided during initialization.
+        :raises AssertionError: If `training_data` was not provided during initialization.
         """
         pprint(self.config.__dict__)
         # Update task config parameter
         self.config.task = "train"
-        assert self.examples_file is not None, "examples_file must be provided when the IntentClassifier was created."
+        assert self.training_data is not None, "training_data must be provided when the IntentClassifier was created."
         
         # Extract one-hot encoded labels
         labels_ohe = self.onehot_encoder\
@@ -563,12 +622,12 @@ class IntentClassifier:
         with open(config_path, 'w') as f:
             f.write(yaml.dump(self.config.__dict__))
         print(f"Model saved to {path}.")
-        if self.config.wandb_project:
+        if self.wandb_project:
             # Crie e envie o artifact
             artifact = wandb.Artifact(
-                name=f"{self.config.dataset_name}-clf-v1",
+                name=f"{self.config.dataset_name}-clf",
                 type="model",
-                description="Modelo Keras v1 para classificação de intenção"
+                description="Modelo Keras para classificação de intenção"
             )
             artifact.add_file(path)
             artifact.add_file(config_path) # Also add the config file
@@ -617,11 +676,11 @@ class IntentClassifier:
             results.append((highest_prob_intent_name, probs_dict))
         
         # Log to Wandb if requested
-        if log_to_wandb and self.config.wandb_project:
+        if log_to_wandb and self.wandb_project:
             # Get the current run ID if it exists, otherwise start a new run
             run_id = wandb.run.id if wandb.run else wandb.util.generate_id()
             # Initialize wandb with the run ID
-            with wandb.init(project=self.config.wandb_project, id=run_id, resume="allow"):
+            with wandb.init(project=self.wandb_project, id=run_id, resume="allow"):
                 wandb.log({
                     "inputs": input_text_list, # Log the list of original input texts
                     "true_labels": true_labels,
@@ -646,9 +705,9 @@ class IntentClassifier:
         :return: A list of dictionaries, where each dictionary is the classification
                  report (from `sklearn.metrics.classification_report`) for a fold.
         :rtype: list[dict(str, Any)]
-        :raises AssertionError: If `examples_file` was not provided during initialization.
+        :raises AssertionError: If `training_data` was not provided during initialization.
         """
-        assert self.examples_file is not None, "examples_file must be provided when the IntentClassifier was created."
+        assert self.training_data is not None, "training_data must be provided when the IntentClassifier was created."
         # Update task config parameter
         self.config.task = "cross_validation"
         kf = StratifiedKFold(n_splits=n_splits, shuffle=True, random_state=42)
@@ -665,7 +724,7 @@ class IntentClassifier:
             print(f"Fold {i+1}/{n_splits}")
             # Create and log a new Wandb run for each fold
             run_name = f"cv_fold_{i+1}"
-            with wandb.init(project=self.config.wandb_project, config=self.config.__dict__, 
+            with wandb.init(project=self.wandb_project, config=self.config.__dict__, 
                             group="cross_validation", name=run_name, reinit=True, 
                             job_type=f"fold_{i+1}"):
                 
@@ -706,7 +765,7 @@ class IntentClassifier:
         print(f"Average kappa: {avg_kappa}")
         
         # Log average metrics to a summary run
-        with wandb.init(project=self.config.wandb_project, config=self.config.__dict__, 
+        with wandb.init(project=self.wandb_project, config=self.config.__dict__, 
                         group="cross_validation", name="cv_summary", reinit=True, 
                         job_type="summary"):
             wandb.log({"avg_f1_macro": avg_f1, "avg_kappa": avg_kappa})
@@ -721,22 +780,24 @@ if __name__ == "__main__":
     # Instead of fire.Fire(IntentClassifier),
     # Define the functions to be used by Fire CLI so that 
     #  it's not cluttered with all the functions in the IntentClassifier class
-    def train(config: str, examples_file: str, save_model: str):
+    def train(config: str, training_data: str, save_model: str, wandb_project: str = None):
         """
         Train the model with the given configuration and examples.
 
         :param config: Path to the YAML configuration file.
         :type config: str
-        :param examples_file: Path to the YAML file with training examples.
-        :type examples_file: str
+        :param training_data: Path to the YAML file with training examples.
+        :type training_data: str
         :param save_model: Path to save the trained model (e.g., "model.keras").
-        :type save_model: str
+        :type save_model: str   
+        :param wandb_project: Name of the Weights & Biases project to log to.
+        :type wandb_project: str
         """
-        classifier = IntentClassifier(config=config, examples_file=examples_file)
+        classifier = IntentClassifier(config=config, training_data=training_data, wandb_project=wandb_project)
         classifier.train(save_model=save_model)
         print("Training completed successfully!")
 
-    def predict(load_model: str, input_text: str):
+    def predict(load_model: str, input_text: str, wandb_project: str = None):
         """
         Make predictions using a trained model.
 
@@ -744,23 +805,27 @@ if __name__ == "__main__":
         :type load_model: str
         :param input_text: The input text string to classify.
         :type input_text: str
+        :param wandb_project: Name of the Weights & Biases project to log to.
+        :type wandb_project: str
         """
-        classifier = IntentClassifier(load_model=load_model)
+        classifier = IntentClassifier(load_model=load_model, wandb_project=wandb_project)
         predictions = classifier.predict(input_text)
         print(f"Predictions: {predictions}")
 
-    def cross_validation(config: str, examples_file: str, n_splits: int = 3):
+    def cross_validation(config: str, training_data: str, n_splits: int = 3, wandb_project: str = None):
         """
         Run cross-validation on the model.
 
         :param config: Path to the YAML configuration file.
         :type config: str
-        :param examples_file: Path to the YAML file with training examples.
-        :type examples_file: str
+        :param training_data: Path to the YAML file with training examples.
+        :type training_data: str
         :param n_splits: The number of folds to use.
         :type n_splits: int, optional
+        :param wandb_project: Name of the Weights & Biases project to log to.
+        :type wandb_project: str
         """
-        classifier = IntentClassifier(config=config, examples_file=examples_file)
+        classifier = IntentClassifier(config=config, training_data=training_data, wandb_project=wandb_project)
         results = classifier.cross_validation(n_splits=n_splits)
         print("Cross-validation completed successfully!")
         pprint(results)

@@ -3,20 +3,32 @@ from datetime import datetime, timezone
 from intent_classifier import IntentClassifier
 from db.engine import log_prediction
 from app.schema import SinglePrediction, PredictionResponse
-import os
+import logging
+
+logger = logging.getLogger(__name__)
 
 # services.py
-def load_all_models() -> dict:
+def load_all_classifiers(models_to_load_str) -> dict:
+    """
+    Carrega todos os modelos de ML especificados na variável de ambiente
+    WANDB_MODELS a partir do registro do Weights & Biases.
+    """
     MODELS = {}
-    try:
-        model_files = [f for f in os.listdir(os.path.join(os.path.dirname(__file__), "..", "intent_classifier", "models")) if f.endswith(".keras")]
-        for model_file in model_files:
-            model_path = os.path.join(os.path.dirname(__file__), "..", "intent_classifier", "models", model_file)
-            model_name = model_file.replace(".keras", "")
-            MODELS[model_name] = IntentClassifier(load_model=model_path)
-        return MODELS
-    except Exception as e:
-        raise Exception(f"Failed to load models: {str(e)}")
+    model_urls = [url.strip() for url in models_to_load_str.split(',') if url.strip()]
+    logger.info(f"Carregando {len(model_urls)} modelo(s) do W&B...")
+    for url in model_urls:
+        try:
+            # 2. Extrair o nome do modelo da URL
+            model_name = url.split('/')[-1].split(':')[0]
+            # 3. Carregar o modelo usando o IntentClassifier
+            logger.info(f"Carregando modelo: '{model_name}' (de {url})")
+            MODELS[model_name] = IntentClassifier(load_model=url)
+            logger.info(f"Modelo '{model_name}' carregado com sucesso.")
+        except Exception as e:
+            logger.error(f"Falha ao carregar o modelo de '{url}': {e}")
+            # Parar a inicialização do app se falhar ao carregar um modelo.
+            raise Exception(f"Falha ao carregar o modelo de '{url}': {e}")
+    return MODELS
 
 
 def predict_and_log_intent(
@@ -30,25 +42,19 @@ def predict_and_log_intent(
     3. Envia o resultado para o log no banco de dados.
     4. Retorna o resultado final formatado.
     """
-    
     # 1. Executa predições (Lógica de ML)
     predictions = {}
     for model_name, model in models.items():
         top_intent, all_probs = model.predict(text)
         predictions[model_name] = SinglePrediction(top_intent=top_intent, all_probs=all_probs)
-
     # 2. Formata o documento de log (Lógica de Dados)
     log_document = PredictionResponse(text=text, 
                                       owner=owner, 
                                       predictions=predictions, 
                                       timestamp=int(datetime.now(timezone.utc).timestamp()))
-    
-    # 3. Salva no BD (Lógica de Persistência)
-    # Convert Pydantic model to dict for MongoDB insertion
-    log_dict = log_document.model_dump(exclude_none=True)  # exclude_none to skip id=None
-    final_result = log_prediction(log_dict)
-    
-    # 4. Retorna o resultado
+    # 3. Salva no BD (Lógica de Persistência) usando a engine.py
+    final_result = log_prediction(log_document)
+    # 4. Retorna o resultado final formatado
     return final_result
 
 

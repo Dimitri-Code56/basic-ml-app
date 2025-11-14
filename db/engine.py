@@ -22,22 +22,27 @@ def get_mongo_collection(collection_name: str):
 
 # --- Funções de Log de Previsão ---
 
-def log_prediction(prediction_data: dict) -> dict:
+def log_prediction(prediction_data) -> dict:
     """
     Insere um log de predição no banco de dados e retorna o
-    documento inserido com o ID formatado.
+    documento inserido com o ID formatado para resposta JSON.
     """
     collection = get_mongo_collection(f"{ENV.upper()}_intent_logs")
     
+    # Converte o modelo Pydantic para um dicionário antes de inserir
+    prediction_dict = prediction_data.model_dump()
+
     # Log the prediction to the database
     try:
-        collection.insert_one(prediction_data)
-        # If insert_one succeeds, it adds '_id' to the 'results' dict
-        prediction_data['id'] = str(prediction_data.get('_id', None))
-        prediction_data.pop('_id', None)
+        # O Pymongo não modifica o dicionário original, mas retorna um objeto de resultado
+        result = collection.insert_one(prediction_dict)
+        
+        # Adicionamos o ID gerado como uma string para a resposta JSON
+        prediction_dict["id"] = str(result.inserted_id)
+
     except Exception as e:
         # If insert_one fails, log the error and continue
         raise Exception(f"Failed to log prediction to database. Error: {e}")
 
-    return prediction_data
+    return prediction_dict
 

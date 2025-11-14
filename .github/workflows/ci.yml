@@ -23,7 +23,7 @@ jobs:
       MONGO_URI: ${{ secrets.MONGO_URI }}
       MONGO_DB: ${{ secrets.MONGO_DB }}
       WANDB_API_KEY: ${{ secrets.WANDB_API_KEY }}
-      WANDB_MODEL_URL: ${{ secrets.WANDB_MODEL_URL }}
+      WANDB_MODELS: ${{ secrets.WANDB_MODELS }}
       ENV: dev
 
     # Passos sequenciais que o job executará

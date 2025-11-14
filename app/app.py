@@ -14,6 +14,9 @@ from db.auth import conditional_auth
 from app import services
 
 
+from contextlib import asynccontextmanager
+
+
 logger = logging.getLogger(__name__)
 
 # Load environment variables from .env file
@@ -23,11 +26,46 @@ load_dotenv()
 ENV = os.getenv("ENV", "prod").lower()
 logger.info(f"Running in {ENV} mode")
 
-# Initialize FastAPI app
+# Dicionário global para armazenar os modelos carregados.
+MODELS = {}
+
+def get_model_urls() -> str:
+    """
+    Busca a string de URLs de modelos da variável de ambiente WANDB_MODELS.
+    Isolar essa lógica em uma função facilita o patching durante os testes.
+    """
+    models_env = os.getenv("WANDB_MODELS")
+    assert models_env is not None, "Variável de ambiente WANDB_MODELS não definida."
+    return models_env
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    """
+    Inicialização do app. Atualmente, apenas carrega modelos do W&B.
+    """
+    global MODELS
+    logger.info("Carregando modelos do W&B durante a inicialização do app...")
+    try:
+        model_urls_str = get_model_urls()
+        MODELS = services.load_all_classifiers(model_urls_str)
+        logger.info("Modelos do W&B carregados com sucesso.")
+    except Exception as e:
+        logger.error(f"Falha crítica ao carregar modelos do W&B: {str(e)}")
+        logger.error(traceback.format_exc())
+        raise Exception(f"Falha crítica ao carregar modelos do W&B: {str(e)}")
+    # This is the point where the app is ready to handle requests
+    yield
+    # Código para ser executado no shutdown (opcional)
+    logger.info("Descarregando modelos e limpando recursos...")
+    MODELS.clear()
+
+
+# Initialize FastAPI app with the lifespan manager
 app = FastAPI(
     title="Basic ML App",
     description="A basic ML app",
     version="1.0.0",
+    lifespan=lifespan,
 )
 
 # Controle de CORS (Cross-Origin Resource Sharing) para prevenir ataques de fontes não autorizadas.
@@ -46,46 +84,33 @@ app.add_middleware(
 )
 
 
-# Initialize models
-MODELS = {}
-try: 
-    logger.info("Loading models...")
-    MODELS = services.load_all_models()
-    logger.info("Models loaded successfully")
-except Exception as e:
-    logger.error(f"Failed to load models: {str(e)}")
-    logger.error(traceback.format_exc())
-    raise Exception(f"Failed to load models: {str(e)}")
-
-
 """
 Routes
 """
 @app.get("/")
 async def root():
-    return {"message": "Basic ML App is running in {ENV} mode"}
+    return {"message": f"Basic ML App is running in {ENV} mode"}
 
 @app.post("/predict")
 async def predict(text: str, owner: str = Depends(conditional_auth)):
     """
     Endpoint de predição.
-    Este é um 'Controller' enxuto. Ele apenas delega.
+    Este é um 'Controller' enxuto. 
+    Ele apenas delega a lógica de negócio para o services.py.
     """
     try:
-        # 1. O Controller delega TODA a lógica de negócio para o Serviço
+        # 1. O Controller delega TODA a lógica de negócio para o services.py
         results = services.predict_and_log_intent(
             text=text, 
             owner=owner, 
             models=MODELS
         )
-        
-        # 2. O Controller retorna a resposta (Lógica de View)
+        # 2. O Controller retorna a resposta (Lógica de View) no formato JSON
         return JSONResponse(content=results)
-        
     except Exception as e:
-        logger.error(f"Erro na predição: {str(e)}")
+        logger.error(f"Erro ao processar a predição: {str(e)}")
         logger.error(traceback.format_exc())
-        raise HTTPException(status_code=500, detail="Erro interno ao processar a predição.")
+        raise HTTPException(status_code=500, detail=f"Erro interno ao processar a predição: {str(e)}")
 
 
 
