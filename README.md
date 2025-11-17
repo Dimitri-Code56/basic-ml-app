@@ -75,30 +75,23 @@ Acompanhe abaixo a linha temporal das alterações realizadas até o momento:
 ```shell
 .                               # "Working directory"
 ├── app/                        # Lógica do serviço web
-│   ├── app.py                  # Controller: Entrypoint da API, lida com rotas e autenticação
-│   ├── services.py             # Services: Lógica de negócio (orquestra predições, etc)
-│   ├── schema.py               # Schemas: Contratos (schemas) das respostas da API
-│   └── app.Dockerfile          # Definição do container para o serviço web
+│   ├── app.py                  # Implementação do backend com FastAPI
+│   ├── app.Dockerfile          # Definição do container em que o backend roda
+│   └── auth.py                 # Gestão dos tokens
 ├── db/                         # Lógica do banco de dados
-│   ├── engine.py               # Engine: Abstração para comunicação com o banco
-│   └── auth.py                 # Auth: Gestão de tokens de acesso
-├── intent_classifier/          # Scripts e arquivos do modelo de ML
-│   ├── intent_classifier.py    # Código principal para treino e avaliação do modelo
-│   ├── data/                   # Dados para treino e teste dos modelos
-│   └── models/                 # Modelos e configurações de treino
-├── dags/                       # Workflows para orquestradores (e.g., Airflow)
-│   └── README.md
+│   └── engine.py               # Encapsulamento do pymongo
+├── intent-classifier/          # Scripts relacionados ao modelo de ML
+│   ├── data/                   # Dados para os modelos de ML
+│   ├── models/                 # Modelos treinados
+│   └── intent-classifier.py    # Código principal do modelo de ML
+├── dags/                       # Workflows integrados no Airflow
+│   └── ...                     # TODO
 ├── tests/                      # Testes unitários e de integração
-│   ├── test_app.py             
-│   └── test_intent_classifier.py 
-├── .github/                    # Workflows de CI/CD com GitHub Actions
-│   └── workflows/
-│       └── ci.yml
-├── docker-compose.yml          # Orquestração de containers (API, DB, etc)
-├── requirements.txt            # Dependências do projeto
-├── pytest.ini                  # Configurações para os testes com pytest
-├── .env.example                # Exemplo de variáveis de ambiente
-└── .gitignore                  # Arquivos e pastas a serem ignorados pelo Git
+│   └── ...                     # TODO
+├── docker-compose.yml          # Arquivo de orquestração dos serviços envolvidos
+├── requirements.txt            # Dependências do Python
+├── .env                        # Variáveis de ambiente
+└── .gitignore
 ```
 
 ## ⚙️ Instruções para deploy em ambiente de teste
