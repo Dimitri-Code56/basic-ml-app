@@ -40,7 +40,7 @@ def log_prediction(prediction_data) -> dict:
         # Adicionamos o ID gerado como uma string para a resposta JSON
         # e removemos o campo `_id` (do tipo ObjectId) que não é serializável.
         prediction_dict["id"] = str(result.inserted_id)
-        del prediction_dict["_id"]
+        prediction_dict.pop("_id", None)
 
     except Exception as e:
         # If insert_one fails, log the error and continue
